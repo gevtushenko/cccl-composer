@@ -1,0 +1,23 @@
+{
+  "src": {
+    "cub": "/home/gevtushenko/src/senior-zero/cub",
+    "thrust": "/home/gevtushenko/src/senior-zero/thrust"
+  },
+  "ctks": {
+    "11.0": "/usr/local/cuda-11.0",
+    "11.6": "/usr/local/cuda-11.6"
+  },
+  "compilers": {
+    "gcc/11": "/usr/bin/g++-11",
+    "gcc/10": "/usr/bin/g++-10",
+    "gcc/9": "/usr/bin/g++-9",
+    "gcc/8": "/opt/gcc/8.5.0/bin/bin/g++",
+    "gcc/6": "/opt/gcc/6.5.0/bin/bin/g++",
+    "gcc/5": "/opt/gcc/5.5.0/bin/bin/g++",
+    "clang/13": "/usr/bin/clang++-13",
+    "clang/12": "/usr/bin/clang++-12",
+    "clang/11": "/usr/bin/clang++-11",
+    "nvhpc/22.3": "/opt/nvidia/hpc_sdk/Linux_x86_64/22.3/compilers/bin/nvc++",
+    "nvhpc/22.5": "/opt/nvidia/hpc_sdk/Linux_x86_64/22.5/compilers/bin/nvc++"
+  }
+}

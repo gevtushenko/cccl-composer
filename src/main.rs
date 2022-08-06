@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::Command as ProcCommand;
 use std::sync::{Arc, Mutex};
 use threadpool::ThreadPool;
+use dirs::config_dir;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -48,8 +49,10 @@ impl AppConfig {
 
 impl AppConfig {
     pub fn new() -> Result<Self, ConfigError> {
+        let config_path = config_dir().unwrap(); 
+        let cccl_config_path = config_path.join("cccl-composer").join("config.json");
         let s = Config::builder()
-            .add_source(File::with_name("config/cccl_composer.json"))
+            .add_source(File::with_name(cccl_config_path.to_str().unwrap()))
             .build()?;
 
         s.try_deserialize()

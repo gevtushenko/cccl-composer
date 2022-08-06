@@ -188,7 +188,7 @@ fn get_targets(cpp: &Vec<&str>, matches: &ArgMatches) -> HashMap<String, String>
             for dialect in cpp {
                 result.insert(
                     dialect.to_string(),
-                    format!("cub.cpp{}.test.{}", dialect, target),
+                    format!("cub.cpp{}.{}", dialect, target),
                 );
             }
         }

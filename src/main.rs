@@ -250,7 +250,7 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
                 let current_dir = env::current_dir().unwrap();
                 let mut build_dir = current_dir.clone();
 
-                build_dir.push(".build");
+                build_dir.push("build");
                 build_dir.push(ctk.clone());
                 build_dir.push(&compiler);
 

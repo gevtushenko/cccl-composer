@@ -20,6 +20,7 @@
     "clang/11": "/usr/bin/clang++-11",
     "nvhpc/20.9": "/opt/nvidia/hpc_sdk/Linux_x86_64/20.9/compilers/bin/nvc++",
     "nvhpc/22.3": "/opt/nvidia/hpc_sdk/Linux_x86_64/22.3/compilers/bin/nvc++",
-    "nvhpc/22.5": "/opt/nvidia/hpc_sdk/Linux_x86_64/22.5/compilers/bin/nvc++"
+    "nvhpc/22.5": "/opt/nvidia/hpc_sdk/Linux_x86_64/22.5/compilers/bin/nvc++",
+    "nvhpc/22.7": "/opt/nvidia/hpc_sdk/Linux_x86_64/22.7/compilers/bin/nvc++"
   }
 }

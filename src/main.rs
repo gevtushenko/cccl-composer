@@ -1,22 +1,22 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use clap_complete::{generate, shells::Zsh};
 use config::{Config, ConfigError, File};
+use dirs::config_dir;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use num_cpus;
 use prettytable::{Row, Table};
+use rayon;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Command as ProcCommand;
-use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use threadpool::ThreadPool;
-use dirs::config_dir;
-use regex::Regex;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -52,7 +52,7 @@ impl AppConfig {
 
 impl AppConfig {
     pub fn new() -> Result<Self, ConfigError> {
-        let config_path = config_dir().unwrap(); 
+        let config_path = config_dir().unwrap();
         let cccl_config_path = config_path.join("cccl-composer").join("config.json");
         let s = Config::builder()
             .add_source(File::with_name(cccl_config_path.to_str().unwrap()))
@@ -241,189 +241,206 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
 
     println!("Build with {num_threads_per_build} threads per build and {num_concurrent_builds} concurrent builds");
 
-    let pool = ThreadPool::new(num_concurrent_builds);
+    rayon::scope(|s| {
+        let m = MultiProgress::new();
+        let sty = ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+        )
+        .unwrap()
+        .progress_chars("##-");
 
-    let m = MultiProgress::new();
-    let sty = ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-    )
-    .unwrap()
-    .progress_chars("##-");
+        for ctk in &ctks {
+            for compiler_label in &compilers {
+                for dialect in &cpp {
+                    for build_type in &types {
+                        let pb = m.add(ProgressBar::new(cpp.len() as u64));
+                        pb.set_style(sty.clone());
+                        pb.set_position(0);
 
-    for ctk in &ctks {
-        for compiler_label in &compilers {
-            for dialect in &cpp {
-                for build_type in &types {
-                    let cxx_path = config
-                        .compilers
-                        .get(&compiler_label.to_string())
-                        .unwrap()
-                        .clone();
-                    let ctk_path = config.ctks.get(&ctk.to_string()).unwrap().clone();
-                    let cpp: Vec<String> = cpp.iter().map(|x| x.to_string()).collect();
-                    let ctk = ctk.to_string();
-                    let compiler = compiler_label.replace("/", ".");
-                    let targets = targets.clone();
-                    let table = Arc::clone(&table);
-                    let cub_path = config.src.get("cub").unwrap().clone();
-                    let thrust_path = config.src.get("thrust").unwrap().clone();
-                    let build_type = build_type.to_string();
-                    let dialect = dialect.to_string();
+                        let compiler = compiler_label.replace("/", ".");
+                        pb.set_message(format!(
+                            "{}/{}/{}/cpp.{}",
+                            build_type, ctk, compiler, dialect
+                        ));
 
-                    let pb = m.add(ProgressBar::new(cpp.len() as u64));
-                    pb.set_style(sty.clone());
-                    pb.set_position(0);
-                    pb.set_message(format!("{}/{}/{}/cpp.{}", build_type, ctk, compiler, dialect));
+                        s.spawn(|_| {
+                            let cxx_path = config
+                                .compilers
+                                .get(&compiler_label.to_string())
+                                .unwrap()
+                                .clone();
 
-                    pool.execute(move || {
-                        let nvcc_path = Path::new(&ctk_path).join("bin").join("nvcc");
-                        let nvcc_path_str = nvcc_path.to_str().unwrap().clone();
-                        let current_dir = env::current_dir().unwrap();
-                        let mut build_dir = current_dir.clone();
+                            let pb = pb;
+                            let compiler = compiler_label.replace("/", ".");
+                            let table = Arc::clone(&table);
+                            let ctk_path = config.ctks.get(&ctk.to_string()).unwrap().clone();
+                            let build_type = build_type.to_string();
+                            let dialect = dialect.to_string();
 
-                        build_dir.push("build");
-                        build_dir.push(ctk.clone());
-                        build_dir.push(&build_type);
-                        build_dir.push(&compiler);
-                        build_dir.push(&dialect);
+                            let cub_path = config.src.get("cub").unwrap();
+                            let thrust_path = config.src.get("thrust").unwrap();
+                            let nvcc_path = Path::new(&ctk_path).join("bin").join("nvcc");
+                            let nvcc_path_str = nvcc_path.to_str().unwrap().clone();
+                            let current_dir = env::current_dir().unwrap();
+                            let mut build_dir = current_dir.clone();
 
-                        fs::create_dir_all(&build_dir).ok();
-                        let build_dir = build_dir.into_os_string().into_string().unwrap();
+                            build_dir.push("build");
+                            build_dir.push(ctk.clone());
+                            build_dir.push(&build_type);
+                            build_dir.push(&compiler);
+                            build_dir.push(&dialect);
 
-                        let mut arguments: Vec<String> = Vec::new();
+                            fs::create_dir_all(&build_dir).ok();
+                            let build_dir = build_dir.into_os_string().into_string().unwrap();
 
-                        arguments.push("-GNinja".to_string());
-                        arguments.push(format!("-B{}", build_dir));
-                        arguments.push(format!("-DCMAKE_BUILD_TYPE={}", build_type).to_string());
-                        arguments.push("-DCUB_DISABLE_ARCH_BY_DEFAULT=ON".to_string());
-                        arguments.push("-DCUB_ENABLE_COMPUTE_80=ON".to_string());
-                        arguments.push("-DCUB_IGNORE_DEPRECATED_CPP_DIALECT=ON".to_string());
-                        arguments.push("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".to_string());
+                            let mut arguments: Vec<String> = Vec::new();
 
-                        if compiler.contains("nvhpc") {
-                            // TODO Push ctk version
-                            // TODO -DCMAKE_CUDA_FLAGS="-gpu=cuda11.6 -gpu=cc86"
-                            arguments.push("-DCMAKE_CUDA_COMPILER_FORCED=ON".to_string());
-                            arguments.push(format!("-DCMAKE_CUDA_COMPILER={}", &cxx_path).to_string());
-                            arguments.push("-DCMAKE_CUDA_COMPILER_ID=NVCXX".to_string());
-                        } else {
-                            arguments.push(format!("-DCMAKE_CUDA_COMPILER={}", nvcc_path_str).to_string());
-                            arguments.push(format!("-DCMAKE_CXX_COMPILER={}", &cxx_path));
-                        }
+                            arguments.push("-GNinja".to_string());
+                            arguments.push(format!("-B{}", build_dir));
+                            arguments
+                                .push(format!("-DCMAKE_BUILD_TYPE={}", build_type).to_string());
+                            arguments.push("-DCUB_DISABLE_ARCH_BY_DEFAULT=ON".to_string());
+                            arguments.push("-DCUB_ENABLE_COMPUTE_80=ON".to_string());
+                            arguments.push("-DCUB_IGNORE_DEPRECATED_CPP_DIALECT=ON".to_string());
+                            arguments.push("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".to_string());
 
-                        for d in ["11", "14", "17"] {
-                            if d == dialect {
-                                arguments.push(format!("-DCUB_ENABLE_DIALECT_CPP{}=ON", d).to_string());
+                            if compiler.contains("nvhpc") {
+                                // TODO Push ctk version
+                                // TODO -DCMAKE_CUDA_FLAGS="-gpu=cuda11.6 -gpu=cc86"
+                                arguments.push("-DCMAKE_CUDA_COMPILER_FORCED=ON".to_string());
+                                arguments.push(
+                                    format!("-DCMAKE_CUDA_COMPILER={}", &cxx_path).to_string(),
+                                );
+                                arguments.push("-DCMAKE_CUDA_COMPILER_ID=NVCXX".to_string());
                             } else {
-                                arguments.push(format!("-DCUB_ENABLE_DIALECT_CPP{}=OFF", d).to_string());
+                                arguments.push(
+                                    format!("-DCMAKE_CUDA_COMPILER={}", nvcc_path_str).to_string(),
+                                );
+                                arguments.push(format!("-DCMAKE_CXX_COMPILER={}", &cxx_path));
                             }
-                        }
-                        arguments.push(format!("-DThrust_DIR={}/thrust/cmake", thrust_path).to_string());
-                        arguments.push("-DCUB_ENABLE_TESTS_WITH_RDC=OFF".to_string());
-                        arguments.push(cub_path);
 
-                        let cmake_output = ProcCommand::new("cmake")
-                            .args(arguments)
-                            .output()
-                            .expect("failed to execute cmake process");
-
-                        let mut results: Vec<String> = Vec::new();
-
-                        results.push(compiler.to_string());
-
-                        if !cmake_output.status.success() {
-                            println!(
-                                "stderr 1: {}",
-                                String::from_utf8_lossy(&cmake_output.stderr)
+                            for d in ["11", "14", "17"] {
+                                if d == dialect {
+                                    arguments.push(
+                                        format!("-DCUB_ENABLE_DIALECT_CPP{}=ON", d.to_string())
+                                            .to_string(),
+                                    );
+                                } else {
+                                    arguments.push(
+                                        format!("-DCUB_ENABLE_DIALECT_CPP{}=OFF", d.to_string())
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                            arguments.push(
+                                format!("-DThrust_DIR={}/thrust/cmake", thrust_path).to_string(),
                             );
-                            results.push("-".to_string());
-                            return;
-                        }
+                            arguments.push("-DCUB_ENABLE_TESTS_WITH_RDC=OFF".to_string());
+                            arguments.push(cub_path.clone());
 
-                        let re = Regex::new(r"^\[(?P<current>\d+)/(?P<total>\d+)\]").unwrap();
+                            let cmake_output = ProcCommand::new("cmake")
+                                .args(arguments)
+                                .output()
+                                .expect("failed to execute cmake process");
 
-                        let mut arguments: Vec<String> = Vec::new();
-                        arguments.push(format!("-C{}", &build_dir).to_string());
-                        arguments.push(format!("-j{}", num_threads_per_build).to_string());
+                            let mut results: Vec<String> = Vec::new();
 
-                        let tgt = targets.get(dialect.as_str()).unwrap();
+                            results.push(compiler.to_string());
 
-                        if !tgt.is_empty() {
-                            arguments.push(tgt.to_string());
-                        }
+                            if !cmake_output.status.success() {
+                                println!(
+                                    "stderr 1: {}",
+                                    String::from_utf8_lossy(&cmake_output.stderr)
+                                );
+                                results.push("-".to_string());
+                                return;
+                            }
 
-                        let mut ninja_child = ProcCommand::new("ninja")
-                            .args(arguments)
-                            .stdout(Stdio::piped())
-                            .spawn()
-                            .expect("failed to execute ninja process");
+                            let re = Regex::new(r"^\[(?P<current>\d+)/(?P<total>\d+)\]").unwrap();
 
-                        loop {
-                            {
-                                let mut f = BufReader::new(ninja_child.stdout.as_mut().unwrap());
-                                let mut buf = String::new();
-                                match f.read_line(&mut buf) {
-                                    Ok(_) => {
-                                        if buf.is_empty() {
-                                            // println!("empty line, exit");
-                                        } else {
+                            let mut arguments: Vec<String> = Vec::new();
+                            arguments.push(format!("-C{}", &build_dir).to_string());
+                            arguments.push(format!("-j{}", num_threads_per_build).to_string());
 
-                                            match re.captures(&buf) {
-                                                Some(caps) => {
-                                                    let current: u64 = caps["current"].parse().unwrap();
-                                                    let total: u64 = caps["total"].parse().unwrap();
-                                                    pb.set_length(total);
-                                                    pb.set_position(current);
-                                                },
-                                                None => {}
+                            let tgt = targets.get(&dialect.to_string()).unwrap();
+
+                            if !tgt.is_empty() {
+                                arguments.push(tgt.to_string());
+                            }
+
+                            let mut ninja_child = ProcCommand::new("ninja")
+                                .args(arguments)
+                                .stdout(Stdio::piped())
+                                .spawn()
+                                .expect("failed to execute ninja process");
+
+                            loop {
+                                {
+                                    let mut f =
+                                        BufReader::new(ninja_child.stdout.as_mut().unwrap());
+                                    let mut buf = String::new();
+                                    match f.read_line(&mut buf) {
+                                        Ok(_) => {
+                                            if buf.is_empty() {
+                                                // println!("empty line, exit");
+                                            } else {
+                                                match re.captures(&buf) {
+                                                    Some(caps) => {
+                                                        let current: u64 =
+                                                            caps["current"].parse().unwrap();
+                                                        let total: u64 =
+                                                            caps["total"].parse().unwrap();
+                                                        pb.set_length(total);
+                                                        pb.set_position(current);
+                                                    }
+                                                    None => {}
+                                                }
                                             }
                                         }
+                                        Err(e) => {
+                                            println!("an error!: {:?}", e);
+                                            break;
+                                        }
                                     }
-                                    Err(e) => {
-                                        println!("an error!: {:?}", e);
+                                }
+
+                                match ninja_child.try_wait() {
+                                    Ok(Some(status)) => {
+                                        // println!("exited with: {status}");
+
+                                        if !status.success() {
+                                            results.push("✗".to_string());
+                                        }
                                         break;
                                     }
-                                }
-                            }
-
-                            match ninja_child.try_wait() {
-                                Ok(Some(status)) => {
-                                    // println!("exited with: {status}");
-
-                                    if !status.success() {
-                                        results.push("✗".to_string());
+                                    Ok(None) => {
+                                        // println!("status not ready yet");
                                     }
-                                    break;
+                                    Err(e) => println!("error attempting to wait: {e}"),
                                 }
-                                Ok(None) => {
-                                    // println!("status not ready yet");
-                                }
-                                Err(e) => println!("error attempting to wait: {e}"),
                             }
-                        }
 
-                        results.push("✓".to_string());
+                            results.push("✓".to_string());
 
-                        pb.finish();
+                            pb.finish();
 
-                        let mut table = table.lock().unwrap();
-                        if !table.contains_key(&ctk.clone()) {
-                            table.insert(ctk.clone(), Table::new());
-                        }
+                            let mut table = table.lock().unwrap();
+                            if !table.contains_key(ctk.clone()) {
+                                table.insert(ctk.to_string(), Table::new());
+                            }
 
-                        table
-                            .get_mut(&ctk.clone())
-                            .unwrap()
-                            .add_row(Row::from(results));
-                    });
+                            table
+                                .get_mut(ctk.clone())
+                                .unwrap()
+                                .add_row(Row::from(results));
+                        });
+                    }
                 }
             }
         }
-    }
 
-    pool.join();
-
-    m.clear().unwrap();
+        m.clear().unwrap();
+    });
 
     let mut headers: Vec<String> = Vec::new();
     let mut tables: Vec<Table> = Vec::new();

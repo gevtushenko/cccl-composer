@@ -3,7 +3,6 @@ use clap_complete::{generate, shells::Zsh};
 use config::{Config, ConfigError, File};
 use dirs::config_dir;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use num_cpus;
 use prettytable::{Row, Table};
 use rayon;
 use regex::Regex;
@@ -234,7 +233,7 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
 
     let table: Arc<Mutex<HashMap<String, Table>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let num_cpus = num_cpus::get();
+    let num_cpus = std::thread::available_parallelism().unwrap().get();
     let num_builds = ctks.len() * compilers.len() * cpp.len();
     let num_concurrent_builds = std::cmp::min(num_cpus, num_builds);
     let num_threads_per_build = num_cpus / num_concurrent_builds;

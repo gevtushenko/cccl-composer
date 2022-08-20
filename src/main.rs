@@ -424,12 +424,12 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
                             pb.finish();
 
                             let mut table = table.lock().unwrap();
-                            if !table.contains_key(ctk.clone()) {
-                                table.insert(ctk.to_string(), Table::new());
+                            if !table.contains_key(&dialect.to_string()) {
+                                table.insert(dialect.to_string(), Table::new());
                             }
 
                             table
-                                .get_mut(ctk.clone())
+                                .get_mut(&dialect.to_string())
                                 .unwrap()
                                 .add_row(Row::from(results));
                         });

@@ -3,7 +3,7 @@ use clap_complete::{generate, shells::Zsh};
 use config::{Config, ConfigError, File};
 use dirs::config_dir;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use prettytable::{Row, Table};
+use prettytable::{color, Attr, Cell, Row, Table};
 use rayon;
 use regex::Regex;
 use serde::Deserialize;
@@ -16,6 +16,7 @@ use std::path::Path;
 use std::process::Command as ProcCommand;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use colored::*;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -226,11 +227,16 @@ fn get_targets(cpp: &Vec<&str>, matches: &ArgMatches) -> HashMap<String, String>
 
 #[derive(Debug)]
 struct BuildResult<'a> {
-    data: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>>>
+    data: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>>>,
 }
 
 impl<'a> BuildResult<'a> {
-    fn new(types: &Vec<&'a str>, ctks: &Vec<&'a str>, cpp: &Vec<&'a str>, compilers: &Vec<&'a str>) -> Self {
+    fn new(
+        types: &Vec<&'a str>,
+        ctks: &Vec<&'a str>,
+        cpp: &Vec<&'a str>,
+        compilers: &Vec<&'a str>,
+    ) -> Self {
         let mut compilers_state: Vec<(&'a str, bool)> = Vec::new();
         for compiler in compilers {
             compilers_state.push((compiler, false));
@@ -242,12 +248,16 @@ impl<'a> BuildResult<'a> {
             cpp_state.insert(dialect, compilers_state.clone());
         }
 
-        let mut ctk_state: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>> = HashMap::new();
+        let mut ctk_state: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>> =
+            HashMap::new();
         for ctk in ctks {
             ctk_state.insert(ctk, cpp_state.clone());
         }
 
-        let mut type_state: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>>> = HashMap::new();
+        let mut type_state: HashMap<
+            &'a str,
+            HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>>,
+        > = HashMap::new();
         for build_type in types {
             type_state.insert(build_type, ctk_state.clone());
         }
@@ -256,14 +266,33 @@ impl<'a> BuildResult<'a> {
     }
 
     fn success(&mut self, build_type: &'a str, ctk: &'a str, cpp: &'a str, compiler: &'a str) {
-        *self.data.get_mut(build_type).unwrap().get_mut(ctk).unwrap().get_mut(cpp).unwrap().get_mut(compiler).unwrap() = true;
+        *self
+            .data
+            .get_mut(build_type)
+            .unwrap()
+            .get_mut(ctk)
+            .unwrap()
+            .get_mut(cpp)
+            .unwrap()
+            .get_mut(compiler)
+            .unwrap() = true;
     }
 
-    fn status(&self, build_type: &'a str, ctk: &'a str, cpp: &'a str, compiler: &'a str) -> &str {
-        if *self.data.get(build_type).unwrap().get(ctk).unwrap().get(cpp).unwrap().get(compiler).unwrap() {
-            return "✓";
+    fn status(&self, build_type: &'a str, ctk: &'a str, cpp: &'a str, compiler: &'a str) -> ColoredString {
+        if *self
+            .data
+            .get(build_type)
+            .unwrap()
+            .get(ctk)
+            .unwrap()
+            .get(cpp)
+            .unwrap()
+            .get(compiler)
+            .unwrap()
+        {
+            return "✓".green();
         } else {
-            return "✗";
+            return "✗".red();
         }
     }
 }
@@ -276,7 +305,9 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
     let targets = get_targets(&cpp, matches);
 
     let num_builds = ctks.len() * compilers.len() * cpp.len() * types.len();
-    let results = Arc::new(Mutex::new(BuildResult::new(&types, &ctks, &cpp, &compilers)));
+    let results = Arc::new(Mutex::new(BuildResult::new(
+        &types, &ctks, &cpp, &compilers,
+    )));
 
     let num_cpus = std::thread::available_parallelism().unwrap().get();
     let num_concurrent_builds = std::cmp::min(num_cpus, num_builds);
@@ -475,7 +506,7 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
             }
         }
 
-       m.clear().unwrap();
+        m.clear().unwrap();
     });
 
     let result = results.lock().unwrap();
@@ -490,21 +521,24 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
             for dialect in &cpp {
                 let mut compiler_table: Table = Table::new();
                 for compiler in &compilers {
-                    compiler_table.add_row(Row::from([compiler, result.status(build_type, ctk, dialect, compiler)]));
+                    compiler_table.add_row(Row::from([
+                        compiler.clear(),
+                        result.status(build_type, ctk, dialect, compiler),
+                    ]));
                 }
                 cpp_row.push(compiler_table);
             }
             let mut cpp_table: Table = Table::new();
-            cpp_table.add_row(Row::from(&cpp));
+            cpp_table.add_row(Row::from(cpp.iter().map(|str| {str.yellow().bold()}).collect::<Vec<ColoredString>>()));
             cpp_table.add_row(Row::from(cpp_row));
             ctk_row.push(cpp_table);
         }
         let mut ctk_table: Table = Table::new();
-        ctk_table.add_row(Row::from(&ctks));
+        ctk_table.add_row(Row::from(ctks.iter().map(|str| {str.yellow().bold()}).collect::<Vec<ColoredString>>()));
         ctk_table.add_row(Row::from(ctk_row));
         build_row.push(ctk_table);
     }
-    summary_table.add_row(Row::from(&types));
+    summary_table.add_row(Row::from(types.iter().map(|str| {str.yellow().bold()}).collect::<Vec<ColoredString>>()));
     summary_table.add_row(Row::from(build_row));
     summary_table.printstd();
 }

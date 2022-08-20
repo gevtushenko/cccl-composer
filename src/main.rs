@@ -224,6 +224,50 @@ fn get_targets(cpp: &Vec<&str>, matches: &ArgMatches) -> HashMap<String, String>
     return result;
 }
 
+#[derive(Debug)]
+struct BuildResult<'a> {
+    data: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>>>
+}
+
+impl<'a> BuildResult<'a> {
+    fn new(types: &Vec<&'a str>, ctks: &Vec<&'a str>, cpp: &Vec<&'a str>, compilers: &Vec<&'a str>) -> Self {
+        let mut compilers_state: Vec<(&'a str, bool)> = Vec::new();
+        for compiler in compilers {
+            compilers_state.push((compiler, false));
+        }
+        let compilers_state: HashMap<&'a str, bool> = compilers_state.into_iter().collect();
+
+        let mut cpp_state: HashMap<&'a str, HashMap<&'a str, bool>> = HashMap::new();
+        for dialect in cpp {
+            cpp_state.insert(dialect, compilers_state.clone());
+        }
+
+        let mut ctk_state: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>> = HashMap::new();
+        for ctk in ctks {
+            ctk_state.insert(ctk, cpp_state.clone());
+        }
+
+        let mut type_state: HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, HashMap<&'a str, bool>>>> = HashMap::new();
+        for build_type in types {
+            type_state.insert(build_type, ctk_state.clone());
+        }
+
+        return Self { data: type_state };
+    }
+
+    fn success(&mut self, build_type: &'a str, ctk: &'a str, cpp: &'a str, compiler: &'a str) {
+        *self.data.get_mut(build_type).unwrap().get_mut(ctk).unwrap().get_mut(cpp).unwrap().get_mut(compiler).unwrap() = true;
+    }
+
+    fn status(&self, build_type: &'a str, ctk: &'a str, cpp: &'a str, compiler: &'a str) -> &str {
+        if *self.data.get(build_type).unwrap().get(ctk).unwrap().get(cpp).unwrap().get(compiler).unwrap() {
+            return "✓";
+        } else {
+            return "✗";
+        }
+    }
+}
+
 fn build(config: &AppConfig, matches: &ArgMatches) {
     let types = get_build_types(&matches);
     let compilers = get_compilers(&config, &matches);
@@ -231,10 +275,10 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
     let cpp = get_dialects(matches);
     let targets = get_targets(&cpp, matches);
 
-    let table: Arc<Mutex<HashMap<String, Table>>> = Arc::new(Mutex::new(HashMap::new()));
+    let num_builds = ctks.len() * compilers.len() * cpp.len() * types.len();
+    let results = Arc::new(Mutex::new(BuildResult::new(&types, &ctks, &cpp, &compilers)));
 
     let num_cpus = std::thread::available_parallelism().unwrap().get();
-    let num_builds = ctks.len() * compilers.len() * cpp.len();
     let num_concurrent_builds = std::cmp::min(num_cpus, num_builds);
     let num_threads_per_build = num_cpus / num_concurrent_builds;
 
@@ -270,11 +314,13 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
                                 .clone();
 
                             let pb = pb;
+                            let compiler_label = compiler_label.clone();
                             let compiler = compiler_label.replace("/", ".");
-                            let table = Arc::clone(&table);
+                            let ctk = ctk.clone();
+                            let result = Arc::clone(&results);
                             let ctk_path = config.ctks.get(&ctk.to_string()).unwrap().clone();
-                            let build_type = build_type.to_string();
-                            let dialect = dialect.to_string();
+                            let build_type = build_type.clone();
+                            let dialect = dialect.clone();
 
                             let cub_path = config.src.get("cub").unwrap();
                             let thrust_path = config.src.get("thrust").unwrap();
@@ -419,43 +465,48 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
                                 }
                             }
 
-                            results.push("✓".to_string());
-
                             pb.finish();
 
-                            let mut table = table.lock().unwrap();
-                            if !table.contains_key(&dialect.to_string()) {
-                                table.insert(dialect.to_string(), Table::new());
-                            }
-
-                            table
-                                .get_mut(&dialect.to_string())
-                                .unwrap()
-                                .add_row(Row::from(results));
+                            let mut r = result.lock().unwrap();
+                            r.success(&build_type, &ctk, &dialect, &compiler_label);
                         });
                     }
                 }
             }
         }
 
-        m.clear().unwrap();
+       m.clear().unwrap();
     });
 
-    let mut headers: Vec<String> = Vec::new();
-    let mut tables: Vec<Table> = Vec::new();
+    let result = results.lock().unwrap();
 
-    let table = table.lock().unwrap();
+    let mut summary_table: Table = Table::new();
 
-    for (key, val) in table.iter() {
-        headers.push(key.clone());
-        tables.push(val.clone());
+    let mut build_row: Vec<Table> = Vec::new();
+    for build_type in &types {
+        let mut ctk_row: Vec<Table> = Vec::new();
+        for ctk in &ctks {
+            let mut cpp_row: Vec<Table> = Vec::new();
+            for dialect in &cpp {
+                let mut compiler_table: Table = Table::new();
+                for compiler in &compilers {
+                    compiler_table.add_row(Row::from([compiler, result.status(build_type, ctk, dialect, compiler)]));
+                }
+                cpp_row.push(compiler_table);
+            }
+            let mut cpp_table: Table = Table::new();
+            cpp_table.add_row(Row::from(&cpp));
+            cpp_table.add_row(Row::from(cpp_row));
+            ctk_row.push(cpp_table);
+        }
+        let mut ctk_table: Table = Table::new();
+        ctk_table.add_row(Row::from(&ctks));
+        ctk_table.add_row(Row::from(ctk_row));
+        build_row.push(ctk_table);
     }
-
-    let mut result_table: Table = Table::new();
-    result_table.add_row(Row::from(headers));
-    result_table.add_row(Row::from(tables));
-
-    result_table.printstd();
+    summary_table.add_row(Row::from(&types));
+    summary_table.add_row(Row::from(build_row));
+    summary_table.printstd();
 }
 
 fn main() -> std::io::Result<()> {

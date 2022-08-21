@@ -73,9 +73,9 @@ fn build_cli(config: &AppConfig) -> clap::App {
         .arg_required_else_help(true)
         .author("CUDA C++ Core Libraries Team")
         .subcommand(
-            Command::new("run")
-                .short_flag('r')
-                .long_flag("run")
+            Command::new("test")
+                .short_flag('t')
+                .long_flag("test")
                 .about("Run CUB tests.")
                 .arg(
                     Arg::new("compilers")
@@ -83,17 +83,38 @@ fn build_cli(config: &AppConfig) -> clap::App {
                         .long("compilers")
                         .action(ArgAction::Set)
                         .multiple_values(true)
+                        .possible_values(compilers.clone())
                         .help("specify compilers."),
                 )
                 .arg(
-                    Arg::new("ctk")
-                        .long("cuda")
+                    Arg::new("dialects")
+                        .short('d')
+                        .long("dialects")
                         .action(ArgAction::Set)
                         .multiple_values(true)
+                        .possible_values(["11", "14", "17"])
+                        .help("specify C++ dialects."),
+                )
+                .arg(
+                    Arg::new("types")
+                        .short('t')
+                        .long("types")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(["debug", "release"])
+                        .help("specify build types."),
+                )
+                .arg(
+                    Arg::new("ctks")
+                        .long("ctks")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(ctks.clone())
                         .help("specify CTK versions."),
                 )
                 .arg(
                     Arg::new("targets")
+                        .long("targets")
                         .help("targets")
                         .action(ArgAction::Set)
                         .multiple_values(true),
@@ -390,6 +411,7 @@ trait Action {
 
 struct Configure {}
 struct Build {}
+struct Test {}
 struct Clean {}
 
 impl Action for Configure {
@@ -538,6 +560,32 @@ impl Action for Clean {
         arguments.push("clean".to_string());
 
         let ninja_child = ProcCommand::new("ninja")
+            .args(arguments)
+            .output()
+            .expect("failed to execute ninja process");
+
+        return ninja_child.status.success();
+    }
+}
+
+impl Action for Test {
+    fn do_action(state: &State) -> bool {
+        if !Build::do_action(&state) {
+            return false;
+        }
+
+        let mut arguments: Vec<String> = Vec::new();
+        arguments.push("--test-dir".to_string());
+        arguments.push(state.build_dir.to_string());
+
+        let tgt = state.targets.get(&state.cpp.to_string()).unwrap();
+
+        if !tgt.is_empty() {
+            arguments.push("-R".to_string());
+            arguments.push(format!(".*{}.*", tgt).to_string());
+        }
+
+        let ninja_child = ProcCommand::new("ctest")
             .args(arguments)
             .output()
             .expect("failed to execute ninja process");
@@ -710,6 +758,9 @@ fn main() -> std::io::Result<()> {
                 Some(("clean", build_matches)) => {
                     perform::<Clean>(&config, &build_matches);
                 }
+                Some(("test", build_matches)) => {
+                    perform::<Test>(&config, &build_matches);
+                }
                 Some(("generate-zsh-completions", _)) => {
                     generate(
                         Zsh,
@@ -717,9 +768,6 @@ fn main() -> std::io::Result<()> {
                         "cccl-composer",
                         &mut io::stdout(),
                     );
-                }
-                Some(("run", _)) => {
-                    println!("run is unsupported");
                 }
                 _ => unreachable!(), // If all subcommands are defined above, anything else is unreachable
             }

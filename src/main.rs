@@ -100,6 +100,47 @@ fn build_cli(config: &AppConfig) -> clap::App {
                 ),
         )
         .subcommand(
+            Command::new("config")
+                .short_flag('c')
+                .long_flag("configure")
+                .about("Build CUB tests.")
+                .arg(
+                    Arg::new("compilers")
+                        .short('c')
+                        .long("compilers")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(compilers.clone())
+                        .help("specify compilers."),
+                )
+                .arg(
+                    Arg::new("dialects")
+                        .short('d')
+                        .long("dialects")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(["11", "14", "17"])
+                        .help("specify C++ dialects."),
+                )
+                .arg(
+                    Arg::new("types")
+                        .short('t')
+                        .long("types")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(["debug", "release"])
+                        .help("specify build types."),
+                )
+                .arg(
+                    Arg::new("ctks")
+                        .long("ctks")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(ctks.clone())
+                        .help("specify CTK versions."),
+                )
+        )
+        .subcommand(
             Command::new("build")
                 .short_flag('S')
                 .long_flag("build")
@@ -601,6 +642,9 @@ fn main() -> std::io::Result<()> {
             let matches = build_cli(&config).get_matches();
 
             match matches.subcommand() {
+                Some(("config", build_matches)) => {
+                    perform::<Configure>(&config, &build_matches);
+                }
                 Some(("build", build_matches)) => {
                     perform::<Build>(&config, &build_matches);
                 }

@@ -1,9 +1,10 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use clap_complete::{generate, shells::Zsh};
+use colored::*;
 use config::{Config, ConfigError, File};
 use dirs::config_dir;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use prettytable::{color, Attr, Cell, Row, Table};
+use prettytable::{Row, Table};
 use rayon;
 use regex::Regex;
 use serde::Deserialize;
@@ -16,7 +17,6 @@ use std::path::Path;
 use std::process::Command as ProcCommand;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use colored::*;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -278,7 +278,13 @@ impl<'a> BuildResult<'a> {
             .unwrap() = true;
     }
 
-    fn status(&self, build_type: &'a str, ctk: &'a str, cpp: &'a str, compiler: &'a str) -> ColoredString {
+    fn status(
+        &self,
+        build_type: &'a str,
+        ctk: &'a str,
+        cpp: &'a str,
+        compiler: &'a str,
+    ) -> ColoredString {
         if *self
             .data
             .get(build_type)
@@ -297,16 +303,171 @@ impl<'a> BuildResult<'a> {
     }
 }
 
-fn build(config: &AppConfig, matches: &ArgMatches) {
+trait Action {
+    fn do_action(state: &State) -> bool;
+}
+
+struct Configure {}
+struct Build {}
+
+impl Action for Configure {
+    fn do_action(state: &State) -> bool {
+        let cxx_path = state
+            .config
+            .compilers
+            .get(&state.compiler.to_string())
+            .unwrap()
+            .clone();
+
+        let cub_path = state.config.src.get("cub").unwrap();
+        let thrust_path = state.config.src.get("thrust").unwrap();
+
+        let mut arguments: Vec<String> = Vec::new();
+
+        arguments.push("-GNinja".to_string());
+        arguments.push(format!("-B{}", state.build_dir));
+        arguments.push(format!("-DCMAKE_BUILD_TYPE={}", state.build_type).to_string());
+        arguments.push("-DCUB_DISABLE_ARCH_BY_DEFAULT=ON".to_string());
+        arguments.push("-DCUB_ENABLE_COMPUTE_80=ON".to_string());
+        arguments.push("-DCUB_IGNORE_DEPRECATED_CPP_DIALECT=ON".to_string());
+        arguments.push("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".to_string());
+
+        if state.compiler.contains("nvhpc") {
+            // TODO Push ctk version
+            // TODO -DCMAKE_CUDA_FLAGS="-gpu=cuda11.6 -gpu=cc86"
+            arguments.push("-DCMAKE_CUDA_COMPILER_FORCED=ON".to_string());
+            arguments.push(format!("-DCMAKE_CUDA_COMPILER={}", &cxx_path).to_string());
+            arguments.push("-DCMAKE_CUDA_COMPILER_ID=NVCXX".to_string());
+        } else {
+            let ctk_path = state
+                .config
+                .ctks
+                .get(&state.ctk.to_string())
+                .unwrap()
+                .clone();
+            let nvcc_path = Path::new(&ctk_path).join("bin").join("nvcc");
+            let nvcc_path_str = nvcc_path.to_str().unwrap().clone();
+            arguments.push(format!("-DCMAKE_CUDA_COMPILER={}", nvcc_path_str).to_string());
+            arguments.push(format!("-DCMAKE_CXX_COMPILER={}", &cxx_path));
+        }
+
+        for d in ["11", "14", "17"] {
+            if d == state.cpp {
+                arguments.push(format!("-DCUB_ENABLE_DIALECT_CPP{}=ON", d.to_string()).to_string());
+            } else {
+                arguments
+                    .push(format!("-DCUB_ENABLE_DIALECT_CPP{}=OFF", d.to_string()).to_string());
+            }
+        }
+        arguments.push(format!("-DThrust_DIR={}/thrust/cmake", thrust_path).to_string());
+        arguments.push("-DCUB_ENABLE_TESTS_WITH_RDC=OFF".to_string());
+        arguments.push(cub_path.clone());
+
+        let cmake_output = ProcCommand::new("cmake")
+            .args(arguments)
+            .output()
+            .expect("failed to execute cmake process");
+
+        if !cmake_output.status.success() {
+            // println!(
+            //     "stderr 1: {}",
+            //     String::from_utf8_lossy(&cmake_output.stderr)
+            // );
+            return false;
+        }
+
+        return true;
+    }
+}
+
+impl Action for Build {
+    fn do_action(state: &State) -> bool {
+        Configure::do_action(&state);
+
+        let re = Regex::new(r"^\[(?P<current>\d+)/(?P<total>\d+)\]").unwrap();
+
+        let mut arguments: Vec<String> = Vec::new();
+        arguments.push(format!("-C{}", &state.build_dir).to_string());
+        arguments.push(format!("-j{}", state.num_threads_per_build).to_string());
+
+        let tgt = state.targets.get(&state.cpp.to_string()).unwrap();
+
+        if !tgt.is_empty() {
+            arguments.push(tgt.to_string());
+        }
+
+        let mut ninja_child = ProcCommand::new("ninja")
+            .args(arguments)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to execute ninja process");
+
+        loop {
+            {
+                let mut f = BufReader::new(ninja_child.stdout.as_mut().unwrap());
+                let mut buf = String::new();
+                match f.read_line(&mut buf) {
+                    Ok(_) => {
+                        if buf.is_empty() {
+                            // println!("empty line, exit");
+                        } else {
+                            match re.captures(&buf) {
+                                Some(caps) => {
+                                    let current: u64 = caps["current"].parse().unwrap();
+                                    let total: u64 = caps["total"].parse().unwrap();
+                                    state.pb.set_length(total);
+                                    state.pb.set_position(current);
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("an error!: {:?}", e);
+                        break;
+                    }
+                }
+            }
+
+            match ninja_child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return true;
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    // println!("status not ready yet");
+                }
+                Err(e) => println!("error attempting to wait: {e}"),
+            }
+        }
+        return false;
+    }
+}
+
+struct State<'a> {
+    config: &'a AppConfig,
+    targets: &'a HashMap<String, String>,
+    pb: &'a ProgressBar,
+    build_dir: String,
+    build_type: &'a str,
+    ctk: &'a str,
+    compiler: &'a str,
+    cpp: &'a str,
+    num_threads_per_build: usize,
+}
+
+fn perform<T: Action>(config: &AppConfig, matches: &ArgMatches) {
     let types = get_build_types(&matches);
     let compilers = get_compilers(&config, &matches);
     let ctks = get_ctks(&config, &matches);
-    let cpp = get_dialects(matches);
-    let targets = get_targets(&cpp, matches);
+    let cpps = get_dialects(matches);
+    let targets = get_targets(&cpps, matches);
 
-    let num_builds = ctks.len() * compilers.len() * cpp.len() * types.len();
+    let num_builds = ctks.len() * compilers.len() * cpps.len() * types.len();
     let results = Arc::new(Mutex::new(BuildResult::new(
-        &types, &ctks, &cpp, &compilers,
+        &types, &ctks, &cpps, &compilers,
     )));
 
     let num_cpus = std::thread::available_parallelism().unwrap().get();
@@ -323,183 +484,59 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
         .unwrap()
         .progress_chars("##-");
 
-        for ctk in &ctks {
-            for compiler_label in &compilers {
-                for dialect in &cpp {
-                    for build_type in &types {
-                        let pb = m.add(ProgressBar::new(cpp.len() as u64));
+        for build_type in &types {
+            for ctk in &ctks {
+                for compiler in &compilers {
+                    for cpp in &cpps {
+                        let pb = m.add(ProgressBar::new(cpps.len() as u64));
                         pb.set_style(sty.clone());
                         pb.set_position(0);
 
-                        let compiler = compiler_label.replace("/", ".");
+                        let compiler_label = compiler.replace("/", ".");
                         pb.set_message(format!(
                             "{}/{}/{}/cpp.{}",
-                            build_type, ctk, compiler, dialect
+                            build_type, ctk, compiler_label, cpp
                         ));
 
                         s.spawn(|_| {
-                            let cxx_path = config
-                                .compilers
-                                .get(&compiler_label.to_string())
-                                .unwrap()
-                                .clone();
+                            let result = Arc::clone(&results);
 
                             let pb = pb;
-                            let compiler_label = compiler_label.clone();
-                            let compiler = compiler_label.replace("/", ".");
+                            let compiler_label = compiler.clone();
                             let ctk = ctk.clone();
-                            let result = Arc::clone(&results);
-                            let ctk_path = config.ctks.get(&ctk.to_string()).unwrap().clone();
                             let build_type = build_type.clone();
-                            let dialect = dialect.clone();
-
-                            let cub_path = config.src.get("cub").unwrap();
-                            let thrust_path = config.src.get("thrust").unwrap();
-                            let nvcc_path = Path::new(&ctk_path).join("bin").join("nvcc");
-                            let nvcc_path_str = nvcc_path.to_str().unwrap().clone();
+                            let cpp = cpp.clone();
                             let current_dir = env::current_dir().unwrap();
                             let mut build_dir = current_dir.clone();
 
                             build_dir.push("build");
                             build_dir.push(ctk.clone());
                             build_dir.push(&build_type);
-                            build_dir.push(&compiler);
-                            build_dir.push(&dialect);
+                            build_dir.push(&compiler_label);
+                            build_dir.push(&cpp);
 
                             fs::create_dir_all(&build_dir).ok();
                             let build_dir = build_dir.into_os_string().into_string().unwrap();
 
-                            let mut arguments: Vec<String> = Vec::new();
+                            let state = State {
+                                config,
+                                targets: &targets,
+                                pb: &pb,
+                                build_dir,
+                                build_type,
+                                ctk,
+                                compiler,
+                                cpp,
+                                num_threads_per_build,
+                            };
 
-                            arguments.push("-GNinja".to_string());
-                            arguments.push(format!("-B{}", build_dir));
-                            arguments
-                                .push(format!("-DCMAKE_BUILD_TYPE={}", build_type).to_string());
-                            arguments.push("-DCUB_DISABLE_ARCH_BY_DEFAULT=ON".to_string());
-                            arguments.push("-DCUB_ENABLE_COMPUTE_80=ON".to_string());
-                            arguments.push("-DCUB_IGNORE_DEPRECATED_CPP_DIALECT=ON".to_string());
-                            arguments.push("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON".to_string());
-
-                            if compiler.contains("nvhpc") {
-                                // TODO Push ctk version
-                                // TODO -DCMAKE_CUDA_FLAGS="-gpu=cuda11.6 -gpu=cc86"
-                                arguments.push("-DCMAKE_CUDA_COMPILER_FORCED=ON".to_string());
-                                arguments.push(
-                                    format!("-DCMAKE_CUDA_COMPILER={}", &cxx_path).to_string(),
-                                );
-                                arguments.push("-DCMAKE_CUDA_COMPILER_ID=NVCXX".to_string());
-                            } else {
-                                arguments.push(
-                                    format!("-DCMAKE_CUDA_COMPILER={}", nvcc_path_str).to_string(),
-                                );
-                                arguments.push(format!("-DCMAKE_CXX_COMPILER={}", &cxx_path));
-                            }
-
-                            for d in ["11", "14", "17"] {
-                                if d == dialect {
-                                    arguments.push(
-                                        format!("-DCUB_ENABLE_DIALECT_CPP{}=ON", d.to_string())
-                                            .to_string(),
-                                    );
-                                } else {
-                                    arguments.push(
-                                        format!("-DCUB_ENABLE_DIALECT_CPP{}=OFF", d.to_string())
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                            arguments.push(
-                                format!("-DThrust_DIR={}/thrust/cmake", thrust_path).to_string(),
-                            );
-                            arguments.push("-DCUB_ENABLE_TESTS_WITH_RDC=OFF".to_string());
-                            arguments.push(cub_path.clone());
-
-                            let cmake_output = ProcCommand::new("cmake")
-                                .args(arguments)
-                                .output()
-                                .expect("failed to execute cmake process");
-
-                            let mut results: Vec<String> = Vec::new();
-
-                            results.push(compiler.to_string());
-
-                            if !cmake_output.status.success() {
-                                println!(
-                                    "stderr 1: {}",
-                                    String::from_utf8_lossy(&cmake_output.stderr)
-                                );
-                                results.push("-".to_string());
-                                return;
-                            }
-
-                            let re = Regex::new(r"^\[(?P<current>\d+)/(?P<total>\d+)\]").unwrap();
-
-                            let mut arguments: Vec<String> = Vec::new();
-                            arguments.push(format!("-C{}", &build_dir).to_string());
-                            arguments.push(format!("-j{}", num_threads_per_build).to_string());
-
-                            let tgt = targets.get(&dialect.to_string()).unwrap();
-
-                            if !tgt.is_empty() {
-                                arguments.push(tgt.to_string());
-                            }
-
-                            let mut ninja_child = ProcCommand::new("ninja")
-                                .args(arguments)
-                                .stdout(Stdio::piped())
-                                .spawn()
-                                .expect("failed to execute ninja process");
-
-                            loop {
-                                {
-                                    let mut f =
-                                        BufReader::new(ninja_child.stdout.as_mut().unwrap());
-                                    let mut buf = String::new();
-                                    match f.read_line(&mut buf) {
-                                        Ok(_) => {
-                                            if buf.is_empty() {
-                                                // println!("empty line, exit");
-                                            } else {
-                                                match re.captures(&buf) {
-                                                    Some(caps) => {
-                                                        let current: u64 =
-                                                            caps["current"].parse().unwrap();
-                                                        let total: u64 =
-                                                            caps["total"].parse().unwrap();
-                                                        pb.set_length(total);
-                                                        pb.set_position(current);
-                                                    }
-                                                    None => {}
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            println!("an error!: {:?}", e);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                match ninja_child.try_wait() {
-                                    Ok(Some(status)) => {
-                                        // println!("exited with: {status}");
-
-                                        if !status.success() {
-                                            results.push("✗".to_string());
-                                        }
-                                        break;
-                                    }
-                                    Ok(None) => {
-                                        // println!("status not ready yet");
-                                    }
-                                    Err(e) => println!("error attempting to wait: {e}"),
-                                }
+                            // cmake
+                            if T::do_action(&state) {
+                                let mut r = result.lock().unwrap();
+                                r.success(&build_type, &ctk, &cpp, &compiler_label);
                             }
 
                             pb.finish();
-
-                            let mut r = result.lock().unwrap();
-                            r.success(&build_type, &ctk, &dialect, &compiler_label);
                         });
                     }
                 }
@@ -518,27 +555,40 @@ fn build(config: &AppConfig, matches: &ArgMatches) {
         let mut ctk_row: Vec<Table> = Vec::new();
         for ctk in &ctks {
             let mut cpp_row: Vec<Table> = Vec::new();
-            for dialect in &cpp {
+            for cpp in &cpps {
                 let mut compiler_table: Table = Table::new();
                 for compiler in &compilers {
                     compiler_table.add_row(Row::from([
                         compiler.clear(),
-                        result.status(build_type, ctk, dialect, compiler),
+                        result.status(build_type, ctk, cpp, compiler),
                     ]));
                 }
                 cpp_row.push(compiler_table);
             }
             let mut cpp_table: Table = Table::new();
-            cpp_table.add_row(Row::from(cpp.iter().map(|str| {str.yellow().bold()}).collect::<Vec<ColoredString>>()));
+            cpp_table.add_row(Row::from(
+                cpps.iter()
+                    .map(|str| str.yellow().bold())
+                    .collect::<Vec<ColoredString>>(),
+            ));
             cpp_table.add_row(Row::from(cpp_row));
             ctk_row.push(cpp_table);
         }
         let mut ctk_table: Table = Table::new();
-        ctk_table.add_row(Row::from(ctks.iter().map(|str| {str.yellow().bold()}).collect::<Vec<ColoredString>>()));
+        ctk_table.add_row(Row::from(
+            ctks.iter()
+                .map(|str| str.yellow().bold())
+                .collect::<Vec<ColoredString>>(),
+        ));
         ctk_table.add_row(Row::from(ctk_row));
         build_row.push(ctk_table);
     }
-    summary_table.add_row(Row::from(types.iter().map(|str| {str.yellow().bold()}).collect::<Vec<ColoredString>>()));
+    summary_table.add_row(Row::from(
+        types
+            .iter()
+            .map(|str| str.yellow().bold())
+            .collect::<Vec<ColoredString>>(),
+    ));
     summary_table.add_row(Row::from(build_row));
     summary_table.printstd();
 }
@@ -552,7 +602,7 @@ fn main() -> std::io::Result<()> {
 
             match matches.subcommand() {
                 Some(("build", build_matches)) => {
-                    build(&config, &build_matches);
+                    perform::<Build>(&config, &build_matches);
                 }
                 Some(("generate-zsh-completions", _)) => {
                     generate(

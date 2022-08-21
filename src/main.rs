@@ -103,7 +103,47 @@ fn build_cli(config: &AppConfig) -> clap::App {
             Command::new("config")
                 .short_flag('c')
                 .long_flag("configure")
-                .about("Build CUB tests.")
+                .about("Configure CUB tests.")
+                .arg(
+                    Arg::new("compilers")
+                        .short('c')
+                        .long("compilers")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(compilers.clone())
+                        .help("specify compilers."),
+                )
+                .arg(
+                    Arg::new("dialects")
+                        .short('d')
+                        .long("dialects")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(["11", "14", "17"])
+                        .help("specify C++ dialects."),
+                )
+                .arg(
+                    Arg::new("types")
+                        .short('t')
+                        .long("types")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(["debug", "release"])
+                        .help("specify build types."),
+                )
+                .arg(
+                    Arg::new("ctks")
+                        .long("ctks")
+                        .action(ArgAction::Set)
+                        .multiple_values(true)
+                        .possible_values(ctks.clone())
+                        .help("specify CTK versions."),
+                )
+        )
+        .subcommand(
+            Command::new("clean")
+                .long_flag("clean")
+                .about("Clean build directories.")
                 .arg(
                     Arg::new("compilers")
                         .short('c')
@@ -350,6 +390,7 @@ trait Action {
 
 struct Configure {}
 struct Build {}
+struct Clean {}
 
 impl Action for Configure {
     fn do_action(state: &State) -> bool {
@@ -423,7 +464,9 @@ impl Action for Configure {
 
 impl Action for Build {
     fn do_action(state: &State) -> bool {
-        Configure::do_action(&state);
+        if !Configure::do_action(&state) {
+            return false;
+        }
 
         let re = Regex::new(r"^\[(?P<current>\d+)/(?P<total>\d+)\]").unwrap();
 
@@ -484,6 +527,22 @@ impl Action for Build {
             }
         }
         return false;
+    }
+}
+
+impl Action for Clean {
+    fn do_action(state: &State) -> bool {
+        let mut arguments: Vec<String> = Vec::new();
+        arguments.push(format!("-C{}", &state.build_dir).to_string());
+        arguments.push("-t".to_string());
+        arguments.push("clean".to_string());
+
+        let ninja_child = ProcCommand::new("ninja")
+            .args(arguments)
+            .output()
+            .expect("failed to execute ninja process");
+
+        return ninja_child.status.success();
     }
 }
 
@@ -647,6 +706,9 @@ fn main() -> std::io::Result<()> {
                 }
                 Some(("build", build_matches)) => {
                     perform::<Build>(&config, &build_matches);
+                }
+                Some(("clean", build_matches)) => {
+                    perform::<Clean>(&config, &build_matches);
                 }
                 Some(("generate-zsh-completions", _)) => {
                     generate(
